@@ -3,7 +3,7 @@
 // Los DATOS (productos, clientes, etc.) los maneja Firestore con enablePersistence()
 // en el propio HTML — este SW no toca esos datos.
 
-const CACHE_NAME = 'distribupanel-shell-v3'; // ⬆️ sube este número si cambias la lista de abajo
+const CACHE_NAME = 'distribupanel-shell-v4'; // ⬆️ sube este número si cambias la lista de abajo
 
 // Ajusta la ruta de tu HTML principal si tu index no se llama exactamente así.
 const SHELL_URLS = [
@@ -20,6 +20,7 @@ const SHELL_URLS = [
   'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
 ];
 
 // --- Instalación: precachea el shell ---
