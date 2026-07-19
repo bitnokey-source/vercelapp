@@ -582,7 +582,7 @@ function CrearNota({productos,clientes}){
         </div>
         <Row style={{gap:5,flexShrink:0}}>
           <button onClick={()=>updQty(item.id,item.cant-1)} style={{background:'#334155',border:'none',color:'#f1f5f9',borderRadius:6,width:26,height:26,cursor:'pointer',fontSize:15}}>-</button>
-          <input type="number" min="1" value={item.cant} onChange={e=>updQty(item.id,e.target.value===''?'':parseInt(e.target.value)||0)} onBlur={e=>{ if(!e.target.value||parseInt(e.target.value)<1) updQty(item.id,1); }} style={{width:44,textAlign:'center',fontWeight:700,fontSize:14,background:'#0f172a',border:'1px solid #334155',borderRadius:6,color:'#f1f5f9',padding:'4px 2px'}}/>
+          <input type="number" min="1" value={item.cant} onChange={e=>{ const v=e.target.value; if(v===''){return;} const n=parseInt(v); if(!isNaN(n)&&n>=1) updQty(item.id,n); }} onBlur={e=>{ if(!e.target.value||parseInt(e.target.value)<1) updQty(item.id,1); }} style={{width:44,textAlign:'center',fontWeight:700,fontSize:14,background:'#0f172a',border:'1px solid #334155',borderRadius:6,color:'#f1f5f9',padding:'4px 2px'}}/>
           <button onClick={()=>updQty(item.id,item.cant+1)} style={{background:'#334155',border:'none',color:'#f1f5f9',borderRadius:6,width:26,height:26,cursor:'pointer',fontSize:15}}>+</button>
         </Row>
         <div style={{minWidth:62,textAlign:'right',fontWeight:700,color:'#38bdf8',fontSize:13}}>{fmt(item.precio*item.cant)}</div>
@@ -775,7 +775,7 @@ function RutaReparto({productos,clientes,rutas}){
           </div>
           <Row style={{gap:5}}>
             <button onClick={()=>updQty(item.id,item.cant-1)} style={{background:'#334155',border:'none',color:'#f1f5f9',borderRadius:6,width:26,height:26,cursor:'pointer',fontSize:15}}>-</button>
-            <input type="number" min="1" value={item.cant} onChange={e=>updQty(item.id,e.target.value===''?'':parseInt(e.target.value)||0)} onBlur={e=>{ if(!e.target.value||parseInt(e.target.value)<1) updQty(item.id,1); }} style={{width:44,textAlign:'center',fontWeight:700,fontSize:14,background:'#0f172a',border:'1px solid #334155',borderRadius:6,color:'#f1f5f9',padding:'4px 2px'}}/>
+            <input type="number" min="1" value={item.cant} onChange={e=>{ const v=e.target.value; if(v===''){return;} const n=parseInt(v); if(!isNaN(n)&&n>=1) updQty(item.id,n); }} onBlur={e=>{ if(!e.target.value||parseInt(e.target.value)<1) updQty(item.id,1); }} style={{width:44,textAlign:'center',fontWeight:700,fontSize:14,background:'#0f172a',border:'1px solid #334155',borderRadius:6,color:'#f1f5f9',padding:'4px 2px'}}/>
             <button onClick={()=>updQty(item.id,item.cant+1)} style={{background:'#334155',border:'none',color:'#f1f5f9',borderRadius:6,width:26,height:26,cursor:'pointer',fontSize:15}}>+</button>
           </Row>
         </Row>)}
@@ -841,7 +841,7 @@ function RutaReparto({productos,clientes,rutas}){
               <div style={{flex:1,minWidth:0,fontSize:13}}>{item.nombre}</div>
               <Row style={{gap:5}}>
                 <button onClick={()=>updEntQty(item.id,item.cant-1)} style={{background:'#334155',border:'none',color:'#f1f5f9',borderRadius:6,width:24,height:24,cursor:'pointer',fontSize:14}}>-</button>
-                <input type="number" min="1" max={item.max} value={item.cant} onChange={e=>updEntQty(item.id,parseInt(e.target.value)||0)} style={{width:40,textAlign:'center',fontWeight:700,fontSize:13,background:'#0f172a',border:'1px solid #334155',borderRadius:6,color:'#f1f5f9',padding:'3px 2px'}}/>
+                <input type="number" min="1" max={item.max} value={item.cant} onChange={e=>{ const v=e.target.value; if(v===''){return;} const n=parseInt(v); if(!isNaN(n)&&n>=1) updEntQty(item.id,n); }} onBlur={e=>{ if(!e.target.value||parseInt(e.target.value)<1) updEntQty(item.id,1); }} style={{width:40,textAlign:'center',fontWeight:700,fontSize:13,background:'#0f172a',border:'1px solid #334155',borderRadius:6,color:'#f1f5f9',padding:'3px 2px'}}/>
                 <button onClick={()=>updEntQty(item.id,item.cant+1)} style={{background:'#334155',border:'none',color:'#f1f5f9',borderRadius:6,width:24,height:24,cursor:'pointer',fontSize:14}}>+</button>
               </Row>
             </Row>)}
