@@ -202,7 +202,7 @@
                 <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                   <span style={{ fontSize: 12, flex: 1 }}>{it.nombre}</span>
                   <button onClick={() => updQty(it.id, it.cant - 1)} style={{ background: '#334155', border: 'none', color: '#f1f5f9', borderRadius: 6, width: 22, height: 22, cursor: 'pointer' }}>-</button>
-                  <span style={{ width: 26, textAlign: 'center', fontSize: 12 }}>{it.cant}</span>
+                  <input type="number" min="1" value={it.cant} onChange={e => { const v = e.target.value; if (v === '') return; const n = parseInt(v); if (!isNaN(n) && n >= 1) updQty(it.id, n); }} onBlur={e => { if (!e.target.value || parseInt(e.target.value) < 1) updQty(it.id, 1); }} style={{ width: 36, textAlign: 'center', fontSize: 12, background: '#0f172a', border: '1px solid #334155', borderRadius: 6, color: '#f1f5f9', padding: '3px 2px' }} />
                   <button onClick={() => updQty(it.id, it.cant + 1)} style={{ background: '#334155', border: 'none', color: '#f1f5f9', borderRadius: 6, width: 22, height: 22, cursor: 'pointer' }}>+</button>
                 </div>
               ))}
@@ -504,7 +504,7 @@
                                         <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                                           <span style={{ fontSize: 12, flex: 1 }}>{it.nombre}</span>
                                           <button onClick={() => updConfirmQty(it.id, it.cant - 1)} style={{ background: '#334155', border: 'none', color: '#f1f5f9', borderRadius: 6, width: 22, height: 22, cursor: 'pointer' }}>-</button>
-                                          <span style={{ width: 26, textAlign: 'center', fontSize: 12 }}>{it.cant}</span>
+                                          <input type="number" min="1" value={it.cant} onChange={e => { const v = e.target.value; if (v === '') return; const n = parseInt(v); if (!isNaN(n) && n >= 1) updConfirmQty(it.id, n); }} onBlur={e => { if (!e.target.value || parseInt(e.target.value) < 1) updConfirmQty(it.id, 1); }} style={{ width: 36, textAlign: 'center', fontSize: 12, background: '#0f172a', border: '1px solid #334155', borderRadius: 6, color: '#f1f5f9', padding: '3px 2px' }} />
                                           <button onClick={() => updConfirmQty(it.id, it.cant + 1)} style={{ background: '#334155', border: 'none', color: '#f1f5f9', borderRadius: 6, width: 22, height: 22, cursor: 'pointer' }}>+</button>
                                         </div>
                                       ))}
