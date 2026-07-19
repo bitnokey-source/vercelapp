@@ -271,9 +271,68 @@
       try { await dbx.collection('rutas_meta').doc(rutaId).update({ paradas: nuevasParadas }); }
       catch (e) { flash('❌ ' + e.message); }
     };
-    const toggleVisitado = (r, paradaId) => {
-      const nuevas = (r.paradas || []).map(p => p.id === paradaId ? { ...p, visitado: !p.visitado } : p);
-      actualizarParadas(r.id, nuevas);
+
+    const [confirmFor, setConfirmFor] = useState(null); // {rutaId, paradaId}
+    const [confirmItems, setConfirmItems] = useState([]);
+    const [confirmPago, setConfirmPago] = useState('contado');
+    const [confirmSaving, setConfirmSaving] = useState(false);
+
+    const abrirConfirmacion = (r, p) => {
+      setConfirmFor({ rutaId: r.id, paradaId: p.id });
+      setConfirmItems(p.items.map(it => ({ ...it })));
+      setConfirmPago('contado');
+    };
+    const updConfirmQty = (id, v) => {
+      if (v < 1) { setConfirmItems(items => items.filter(x => x.id !== id)); return; }
+      setConfirmItems(items => items.map(x => x.id === id ? { ...x, cant: v } : x));
+    };
+
+    const confirmarEntrega = async (r, p) => {
+      if (confirmItems.length === 0) { flash('⚠️ Agrega al menos un producto'); return; }
+      setConfirmSaving(true);
+      try {
+        const faltantes = [];
+        confirmItems.forEach(item => {
+          const prod = productos.find(x => x.id === item.id);
+          if (!prod || prod.stock < item.cant) faltantes.push(`${item.nombre} (disp: ${prod ? prod.stock : 0}, pedido: ${item.cant})`);
+        });
+        if (faltantes.length > 0) { flash('❌ Sin stock: ' + faltantes.join(', ')); setConfirmSaving(false); return; }
+
+        const total = confirmItems.reduce((s, it) => {
+          const prod = productos.find(x => x.id === it.id);
+          return s + (prod ? prod.precio : 0) * it.cant;
+        }, 0);
+        const itemsConPrecio = confirmItems.map(it => {
+          const prod = productos.find(x => x.id === it.id);
+          return { id: it.id, nombre: it.nombre, cant: it.cant, precio: prod ? prod.precio : 0 };
+        });
+
+        const batch = dbx.batch();
+        const notaRef = dbx.collection('notas').doc();
+        batch.set(notaRef, {
+          fecha: new Date().toISOString(), clienteId: p.clienteId, clienteNombre: p.clienteNombre,
+          clienteTelefono: p.clienteTelefono || '', items: itemsConPrecio, total, formaPago: confirmPago,
+          rutaMetaId: r.id,
+        });
+        if (confirmPago === 'credito') {
+          batch.set(dbx.collection('creditos').doc(), {
+            notaId: notaRef.id, clienteId: p.clienteId, clienteNombre: p.clienteNombre,
+            fecha: new Date().toISOString(), total, saldo: total, abonos: [],
+          });
+        }
+        itemsConPrecio.forEach(it => {
+          batch.update(dbx.collection('productos').doc(it.id), { stock: firebase.firestore.FieldValue.increment(-it.cant) });
+        });
+        await batch.commit();
+
+        const nuevas = (r.paradas || []).map(x => x.id === p.id
+          ? { ...x, visitado: true, notaId: notaRef.id, totalEntregado: total, formaPago: confirmPago, fechaEntrega: new Date().toISOString() }
+          : x);
+        await actualizarParadas(r.id, nuevas);
+        setConfirmFor(null);
+        flash('✅ Entrega registrada — ' + fmtx(total));
+      } catch (e) { flash('❌ ' + e.message); }
+      setConfirmSaving(false);
     };
 
     // ---- Mapa ----
@@ -429,12 +488,34 @@
                           {expandPlan === r.id && (
                             <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, marginBottom: 6 }}>
                               {r.paradas.map(p => (
-                                <div key={p.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
-                                  <button onClick={() => toggleVisitado(r, p.id)} style={{ background: 'none', border: 'none', color: p.visitado ? '#22c55e' : '#475569', cursor: 'pointer', fontSize: 16, flexShrink: 0, marginTop: 1 }}>{p.visitado ? '✅' : '⬜'}</button>
-                                  <div>
-                                    <div style={{ fontSize: 12, fontWeight: 700, textDecoration: p.visitado ? 'line-through' : 'none', color: p.visitado ? '#64748b' : '#f1f5f9' }}>{p.clienteNombre}</div>
-                                    <div style={{ fontSize: 11, color: '#64748b' }}>{p.items.map(it => `${it.nombre} x${it.cant}`).join(', ')}</div>
+                                <div key={p.id} style={{ marginBottom: 10 }}>
+                                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                                    <button onClick={() => p.visitado ? null : (confirmFor && confirmFor.paradaId === p.id ? setConfirmFor(null) : abrirConfirmacion(r, p))} style={{ background: 'none', border: 'none', color: p.visitado ? '#22c55e' : '#475569', cursor: p.visitado ? 'default' : 'pointer', fontSize: 16, flexShrink: 0, marginTop: 1 }}>{p.visitado ? '✅' : '⬜'}</button>
+                                    <div style={{ flex: 1 }}>
+                                      <div style={{ fontSize: 12, fontWeight: 700, textDecoration: p.visitado ? 'line-through' : 'none', color: p.visitado ? '#64748b' : '#f1f5f9' }}>{p.clienteNombre}</div>
+                                      <div style={{ fontSize: 11, color: '#64748b' }}>{p.items.map(it => `${it.nombre} x${it.cant}`).join(', ')}</div>
+                                      {p.visitado && <div style={{ fontSize: 11, color: '#22c55e', marginTop: 2 }}>Entregado · {fmtx(p.totalEntregado)} · {p.formaPago}</div>}
+                                    </div>
                                   </div>
+                                  {confirmFor && confirmFor.paradaId === p.id && (
+                                    <div style={{ background: '#1e293b', borderRadius: 8, padding: 10, marginTop: 6, marginLeft: 24 }}>
+                                      <div style={{ fontSize: 10, color: '#64748b', fontWeight: 700, marginBottom: 6 }}>CONFIRMAR ENTREGA</div>
+                                      {confirmItems.map(it => (
+                                        <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                          <span style={{ fontSize: 12, flex: 1 }}>{it.nombre}</span>
+                                          <button onClick={() => updConfirmQty(it.id, it.cant - 1)} style={{ background: '#334155', border: 'none', color: '#f1f5f9', borderRadius: 6, width: 22, height: 22, cursor: 'pointer' }}>-</button>
+                                          <span style={{ width: 26, textAlign: 'center', fontSize: 12 }}>{it.cant}</span>
+                                          <button onClick={() => updConfirmQty(it.id, it.cant + 1)} style={{ background: '#334155', border: 'none', color: '#f1f5f9', borderRadius: 6, width: 22, height: 22, cursor: 'pointer' }}>+</button>
+                                        </div>
+                                      ))}
+                                      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                                        {[['contado', '💵 Contado', '#166534', '#4ade80'], ['credito', '📋 Crédito', '#78350f', '#fcd34d']].map(([v, l, bg, col]) => (
+                                          <button key={v} onClick={() => setConfirmPago(v)} style={{ flex: 1, padding: 7, borderRadius: 8, border: 'none', background: confirmPago === v ? bg : '#0f172a', color: confirmPago === v ? col : '#94a3b8', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>{l}</button>
+                                        ))}
+                                      </div>
+                                      <button onClick={() => confirmarEntrega(r, p)} disabled={confirmSaving} style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12, opacity: confirmSaving ? 0.6 : 1 }}>{confirmSaving ? 'Guardando…' : '✓ Confirmar entrega'}</button>
+                                    </div>
+                                  )}
                                 </div>
                               ))}
                               <div style={{ borderTop: '1px solid #334155', paddingTop: 8, marginTop: 4 }}>
