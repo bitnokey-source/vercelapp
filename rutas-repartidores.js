@@ -39,7 +39,43 @@
     document.body.appendChild(script);
   }
 
-  // ---- Firebase: reutiliza la app ya inicializada por index.html ----
+  // ---- Carga de QRCode.js (generación de QR) bajo demanda ----
+  let qrLibLoading = false;
+  function ensureQRCodeLib(cb) {
+    if (window.QRCode) { cb(); return; }
+    if (qrLibLoading) { const check = setInterval(() => { if (window.QRCode) { clearInterval(check); cb(); } }, 200); return; }
+    qrLibLoading = true;
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+    script.onload = () => { qrLibLoading = false; cb(); };
+    script.onerror = () => { qrLibLoading = false; cb(); };
+    document.body.appendChild(script);
+  }
+  const QR_PREFIX = 'PDLC-CLIENTE:';
+  const qrTextForCliente = id => QR_PREFIX + id;
+  function parseClienteQR(text) {
+    if (!text) return null;
+    return text.startsWith(QR_PREFIX) ? text.slice(QR_PREFIX.length) : text;
+  }
+  function renderQRDataURL(text, size, cb) {
+    ensureQRCodeLib(() => {
+      const holder = document.createElement('div');
+      holder.style.cssText = 'position:fixed;left:-9999px;top:-9999px';
+      document.body.appendChild(holder);
+      try {
+        new window.QRCode(holder, { text, width: size, height: size, correctLevel: window.QRCode.CorrectLevel.M });
+        setTimeout(() => {
+          const canvas = holder.querySelector('canvas');
+          const img = holder.querySelector('img');
+          const url = canvas ? canvas.toDataURL('image/png') : (img ? img.src : null);
+          document.body.removeChild(holder);
+          cb(url);
+        }, 150);
+      } catch (e) { document.body.removeChild(holder); cb(null); }
+    });
+  }
+
+
   const fbApp = firebase.app();
   const dbx = fbApp.firestore();
   const authx = fbApp.auth();
@@ -97,6 +133,14 @@
     const lineasEnt = entregas.map(e => `• ${e.clienteNombre}: ${fmtx(e.total)} (${e.formaPago})`).join('\n');
     const texto = `🚚 *GUÍA DE RUTA*\n📅 ${fDateTime(r.fecha)}\n\n*Cargamento:*\n${lineasCarga || 'Sin productos'}\n\n*Entregas (${entregas.length}):*\n${lineasEnt || 'Sin entregas'}\n\n💰 *Total vendido: ${fmtx(totalVendido)}*`;
     let tel = (telefono || '').replace(/\D/g, '');
+    if (tel && !tel.startsWith('52') && tel.length <= 10) tel = '52' + tel;
+    return `https://wa.me/${tel}?text=${encodeURIComponent(texto)}`;
+  }
+
+  function waVentaLink(cliente, items, total, pago) {
+    const lineas = items.map(it => `• ${it.nombre} x${it.cant} = ${fmtx((it.precio || 0) * it.cant)}`).join('\n');
+    const texto = `🧾 *PEDIDO*\n👤 ${cliente.nombre}\n\n${lineas}\n\n💰 *Total: ${fmtx(total)}*\nPago: ${pago}`;
+    let tel = (cliente.telefono || '').replace(/\D/g, '');
     if (tel && !tel.startsWith('52') && tel.length <= 10) tel = '52' + tel;
     return `https://wa.me/${tel}?text=${encodeURIComponent(texto)}`;
   }
@@ -214,6 +258,69 @@
     );
   }
 
+  function imprimirQRHTML(cliente, dataURL) {
+    return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>QR — ${cliente.nombre}</title>
+      <style>
+        *{box-sizing:border-box;font-family:system-ui,-apple-system,sans-serif}
+        body{padding:24px;color:#0f172a;text-align:center}
+        img{width:240px;height:240px;margin:12px auto}
+        h1{font-size:18px;margin-bottom:2px}
+        p{color:#475569;font-size:13px}
+        @media print{ button{display:none} }
+      </style></head><body>
+      <h1>${cliente.nombre}</h1>
+      <p>${cliente.telefono || ''}${cliente.domicilio ? ' · ' + cliente.domicilio : ''}</p>
+      ${dataURL ? `<img src="${dataURL}"/>` : '<p>No se pudo generar el QR</p>'}
+      <p>Escanea este código al entregar para abrir la nota de este cliente.</p>
+      <button onclick="window.print()" style="margin-top:14px;background:#38bdf8;border:none;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer">🖨️ Imprimir</button>
+      </body></html>`;
+  }
+  function imprimirQR(cliente, dataURL) {
+    const w = window.open('', '_blank');
+    if (!w) { alert('Habilita las ventanas emergentes para imprimir el QR.'); return; }
+    w.document.write(imprimirQRHTML(cliente, dataURL));
+    w.document.close();
+  }
+
+  // ---- Escáner de QR de cliente (usa Html5Qrcode, ya cargado por index.html) ----
+  function ClienteScanner({ onDetected, onClose }) {
+    const [elId] = useState(() => 'cli-scanner-' + uidx());
+    const [err, setErr] = useState('');
+    useEffect(() => {
+      if (typeof window.Html5Qrcode === 'undefined') { setErr('No se pudo cargar la librería de escaneo.'); return; }
+      let scanner = null, stopped = false, cancelled = false;
+      (async () => {
+        try {
+          scanner = new window.Html5Qrcode(elId);
+          await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 240, height: 240 } },
+            decodedText => {
+              if (stopped || cancelled) return;
+              stopped = true;
+              scanner.stop().then(() => scanner.clear()).catch(() => {});
+              onDetected(decodedText);
+            }, () => {});
+        } catch (e) { if (!cancelled) setErr('No se pudo acceder a la cámara. Revisa los permisos del navegador.'); }
+      })();
+      return () => {
+        cancelled = true;
+        if (scanner && !stopped) { stopped = true; try { scanner.stop().then(() => scanner.clear()).catch(() => {}); } catch (e) {} }
+      };
+    }, []);
+    return (
+      <div style={{ position: 'fixed', inset: 0, background: '#000c', zIndex: 320, display: 'flex', alignItems: 'flex-end' }}>
+        <div style={{ background: '#1e293b', width: '100%', maxWidth: 420, margin: '0 auto', borderRadius: '18px 18px 0 0', padding: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+            <span style={{ fontSize: 16, fontWeight: 700 }}>📷 Escanear QR de cliente</span>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: 20, cursor: 'pointer' }}>✕</button>
+          </div>
+          {err ? <div style={{ fontSize: 13, color: '#f87171', textAlign: 'center', padding: '24px 0' }}>{err}</div>
+            : <div id={elId} style={{ width: '100%', borderRadius: 10, overflow: 'hidden', background: '#000' }} />}
+        </div>
+      </div>
+    );
+  }
+
+
   function RepartidoresPanel() {
     const [open, setOpen] = useState(false);
     const [tab, setTab] = useState('activas');
@@ -236,6 +343,14 @@
     const markersRef = useRef({});
     const watchIdRef = useRef(null);
     const [tracking, setTracking] = useState(null);
+    const [qrModalFor, setQrModalFor] = useState(null);
+    const [qrDataURL, setQrDataURL] = useState(null);
+    const [clienteScanOpen, setClienteScanOpen] = useState(false);
+    const [clienteBuscarOpen, setClienteBuscarOpen] = useState(false);
+    const [cliQSearch, setCliQSearch] = useState('');
+    const [nuevoCliForm, setNuevoCliForm] = useState(null);
+    const [ventaRapida, setVentaRapida] = useState(null); // {cliente, items, pago, ubicacion, saving}
+    const [ventaProdSearch, setVentaProdSearch] = useState('');
 
     const flash = m => { setMsg(m); setTimeout(() => setMsg(''), 3000); };
 
@@ -421,6 +536,82 @@
       flash('Ruta cancelada');
     };
 
+    // ---- QR de cliente ----
+    const verQR = cliente => {
+      setQrModalFor(cliente); setQrDataURL(null);
+      renderQRDataURL(qrTextForCliente(cliente.id), 260, url => setQrDataURL(url));
+    };
+
+    const crearClienteRapido = async () => {
+      if (!nuevoCliForm.nombre) { flash('⚠️ Falta el nombre'); return; }
+      try {
+        const ref = await dbx.collection('clientes').add({
+          nombre: nuevoCliForm.nombre, telefono: nuevoCliForm.telefono || '', domicilio: nuevoCliForm.domicilio || '', activo: true,
+        });
+        setNuevoCliForm(null);
+        flash('✅ Cliente creado');
+        verQR({ id: ref.id, nombre: nuevoCliForm.nombre, telefono: nuevoCliForm.telefono || '', domicilio: nuevoCliForm.domicilio || '' });
+      } catch (e) { flash('❌ ' + e.message); }
+    };
+
+    // ---- Venta rápida (escaneo QR o búsqueda manual) ----
+    const abrirVentaParaCliente = cliente => {
+      setClienteScanOpen(false); setClienteBuscarOpen(false); setCliQSearch('');
+      setVentaRapida({ cliente, items: [], pago: 'contado', saving: false });
+    };
+    const onScanCliente = text => {
+      const id = parseClienteQR(text);
+      const cli = clientes.find(c => c.id === id);
+      if (!cli) { setClienteScanOpen(false); flash('⚠️ QR no reconocido como cliente'); return; }
+      abrirVentaParaCliente(cli);
+    };
+    const addProdVenta = p => setVentaRapida(v => {
+      const ex = v.items.find(x => x.id === p.id);
+      const items = ex ? v.items.map(x => x.id === p.id ? { ...x, cant: x.cant + 1 } : x) : [...v.items, { id: p.id, nombre: p.nombre, cant: 1 }];
+      return { ...v, items };
+    });
+    const updQtyVenta = (id, val) => setVentaRapida(v => ({ ...v, items: val < 1 ? v.items.filter(x => x.id !== id) : v.items.map(x => x.id === id ? { ...x, cant: val } : x) }));
+
+    const guardarVentaRapida = async () => {
+      if (!ventaRapida || ventaRapida.items.length === 0) { flash('⚠️ Agrega al menos un producto'); return; }
+      setVentaRapida(v => ({ ...v, saving: true }));
+      try {
+        const faltantes = [];
+        ventaRapida.items.forEach(item => {
+          const prod = productos.find(x => x.id === item.id);
+          if (!prod || prod.stock < item.cant) faltantes.push(`${item.nombre} (disp: ${prod ? prod.stock : 0})`);
+        });
+        if (faltantes.length > 0) { flash('❌ Sin stock: ' + faltantes.join(', ')); setVentaRapida(v => ({ ...v, saving: false })); return; }
+
+        const itemsConPrecio = ventaRapida.items.map(it => {
+          const prod = productos.find(x => x.id === it.id);
+          return { id: it.id, nombre: it.nombre, cant: it.cant, precio: prod ? prod.precio : 0 };
+        });
+        const total = itemsConPrecio.reduce((s, it) => s + it.precio * it.cant, 0);
+        const loc = await getLoc();
+
+        const batch = dbx.batch();
+        const notaRef = dbx.collection('notas').doc();
+        batch.set(notaRef, {
+          fecha: new Date().toISOString(), clienteId: ventaRapida.cliente.id, clienteNombre: ventaRapida.cliente.nombre,
+          clienteTelefono: ventaRapida.cliente.telefono || '', items: itemsConPrecio, total, formaPago: ventaRapida.pago,
+          origen: 'qr_cliente', ...(loc ? { ubicacion: loc } : {}),
+        });
+        if (ventaRapida.pago === 'credito') {
+          batch.set(dbx.collection('creditos').doc(), {
+            notaId: notaRef.id, clienteId: ventaRapida.cliente.id, clienteNombre: ventaRapida.cliente.nombre,
+            fecha: new Date().toISOString(), total, saldo: total, abonos: [],
+          });
+        }
+        itemsConPrecio.forEach(it => {
+          batch.update(dbx.collection('productos').doc(it.id), { stock: firebase.firestore.FieldValue.increment(-it.cant) });
+        });
+        await batch.commit();
+        setVentaRapida(v => ({ ...v, saving: false, done: { total, notaId: notaRef.id, tuvoUbicacion: !!loc, items: itemsConPrecio, pago: v.pago } }));
+        flash('✅ Venta guardada — ' + fmtx(total));
+      } catch (e) { flash('❌ ' + e.message); setVentaRapida(v => ({ ...v, saving: false })); }
+    };
+
     const iniciarSeguimiento = r => {
       if (!navigator.geolocation) { flash('⚠️ Este dispositivo no soporta GPS'); return; }
       if (watchIdRef.current) navigator.geolocation.clearWatch(watchIdRef.current);
@@ -462,8 +653,8 @@
               </div>
               {msg && <div style={{ background: '#14532d', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: '#4ade80', marginBottom: 12 }}>{msg}</div>}
               <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
-                {[['activas', 'Activas'], ['mapa', 'Mapa'], ['comprobantes', 'Comprobantes'], ['historial', 'Historial']].map(([v, l]) => (
-                  <button key={v} onClick={() => setTab(v)} style={{ flex: 1, padding: '8px 2px', borderRadius: 8, border: 'none', background: tab === v ? '#38bdf8' : '#1e293b', color: tab === v ? '#0f172a' : '#94a3b8', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>{l}</button>
+                {[['activas', 'Activas'], ['mapa', 'Mapa'], ['clientesqr', 'Clientes'], ['comprobantes', 'Comprob.'], ['historial', 'Historial']].map(([v, l]) => (
+                  <button key={v} onClick={() => setTab(v)} style={{ flex: 1, padding: '8px 1px', borderRadius: 8, border: 'none', background: tab === v ? '#38bdf8' : '#1e293b', color: tab === v ? '#0f172a' : '#94a3b8', fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>{l}</button>
                 ))}
               </div>
 
@@ -550,6 +741,47 @@
                   <div ref={mapRef} style={{ width: '100%', height: 380, borderRadius: 12, background: '#1e293b' }} />
                   <div style={{ fontSize: 11, color: '#64748b', marginTop: 8, textAlign: 'center' }}>Muestra las rutas en curso que están compartiendo ubicación en vivo.</div>
                 </div>
+              )}
+
+              {tab === 'clientesqr' && (
+                <>
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+                    <button onClick={() => setClienteScanOpen(true)} style={{ flex: 1, background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 10, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>📷 Escanear para vender</button>
+                    <button onClick={() => setClienteBuscarOpen(o => !o)} style={{ flex: 1, background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: 8, padding: 10, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>🔍 Buscar manualmente</button>
+                  </div>
+                  {clienteBuscarOpen && (
+                    <div style={{ marginBottom: 14 }}>
+                      <input value={cliQSearch} onChange={e => setCliQSearch(e.target.value)} placeholder="Buscar cliente…" style={inputStyle} />
+                      <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+                        {clientes.filter(c => c.activo && c.nombre.toLowerCase().includes(cliQSearch.toLowerCase())).map(c => (
+                          <div key={c.id} onClick={() => abrirVentaParaCliente(c)} style={{ padding: '8px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 13, background: '#1e293b', marginBottom: 4 }}>{c.nombre}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <button onClick={() => setNuevoCliForm(f => f ? null : { nombre: '', telefono: '', domicilio: '' })} style={{ width: '100%', background: 'transparent', color: '#38bdf8', border: '1px dashed #334155', borderRadius: 8, padding: 10, fontWeight: 700, cursor: 'pointer', fontSize: 12, marginBottom: 14 }}>+ Nuevo cliente (genera QR)</button>
+                  {nuevoCliForm && (
+                    <div style={{ background: '#1e293b', borderRadius: 12, padding: 14, marginBottom: 14 }}>
+                      <div style={lblStyle}>Nombre</div>
+                      <input value={nuevoCliForm.nombre} onChange={e => setNuevoCliForm(f => ({ ...f, nombre: e.target.value }))} style={inputStyle} />
+                      <div style={lblStyle}>Teléfono</div>
+                      <input value={nuevoCliForm.telefono} onChange={e => setNuevoCliForm(f => ({ ...f, telefono: e.target.value }))} style={inputStyle} />
+                      <div style={lblStyle}>Domicilio</div>
+                      <input value={nuevoCliForm.domicilio} onChange={e => setNuevoCliForm(f => ({ ...f, domicilio: e.target.value }))} style={{ ...inputStyle, marginBottom: 12 }} />
+                      <button onClick={crearClienteRapido} style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 10, fontWeight: 700, cursor: 'pointer' }}>💾 Guardar y generar QR</button>
+                    </div>
+                  )}
+                  <input value={cliQSearch} onChange={e => setCliQSearch(e.target.value)} placeholder="🔍 Buscar en la lista…" style={inputStyle} />
+                  {clientes.filter(c => c.activo && c.nombre.toLowerCase().includes(cliQSearch.toLowerCase())).map(c => (
+                    <div key={c.id} style={{ background: '#1e293b', borderRadius: 12, padding: 12, marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 13 }}>{c.nombre}</div>
+                        <div style={{ fontSize: 11, color: '#64748b' }}>{c.telefono || '—'}</div>
+                      </div>
+                      <button onClick={() => verQR(c)} style={{ background: '#172554', color: '#60a5fa', border: 'none', borderRadius: 8, padding: '7px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>🔲 QR</button>
+                    </div>
+                  ))}
+                </>
               )}
 
               {tab === 'comprobantes' && (
@@ -639,6 +871,78 @@
                     <div style={lblStyle}>Clientes y productos por visitar</div>
                     <ParadaBuilder clientes={clientes} productos={productos} paradas={form.paradas} onChange={ps => setForm(f => ({ ...f, paradas: ps }))} />
                     <button onClick={crear} style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 12, fontWeight: 700, cursor: 'pointer', marginTop: 6 }}>💾 Guardar</button>
+                  </div>
+                </div>
+              )}
+
+              {qrModalFor && (
+                <div style={{ position: 'fixed', inset: 0, background: '#000c', zIndex: 310, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <div style={{ background: '#1e293b', borderRadius: 16, padding: 24, maxWidth: 320, width: '90%', textAlign: 'center' }}>
+                    <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 2 }}>{qrModalFor.nombre}</div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 14 }}>{qrModalFor.telefono || ''}</div>
+                    <div style={{ background: '#fff', borderRadius: 12, padding: 14, minHeight: 260, minWidth: 260, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {qrDataURL ? <img src={qrDataURL} style={{ width: 232, height: 232 }} /> : <span style={{ color: '#94a3b8', fontSize: 12 }}>Generando…</span>}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+                      <button onClick={() => imprimirQR(qrModalFor, qrDataURL)} style={{ flex: 1, background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 10, fontWeight: 700, cursor: 'pointer', fontSize: 13 }} disabled={!qrDataURL}>🖨️ Imprimir</button>
+                      <button onClick={() => setQrModalFor(null)} style={{ flex: 1, background: '#0f172a', color: '#94a3b8', border: '1px solid #334155', borderRadius: 8, padding: 10, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>Cerrar</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {clienteScanOpen && <ClienteScanner onDetected={onScanCliente} onClose={() => setClienteScanOpen(false)} />}
+
+              {ventaRapida && (
+                <div style={{ position: 'fixed', inset: 0, background: '#000c', zIndex: 310, display: 'flex', alignItems: 'flex-end' }}>
+                  <div style={{ background: '#1e293b', width: '100%', maxWidth: 420, margin: '0 auto', borderRadius: '18px 18px 0 0', padding: 20, maxHeight: '88vh', overflowY: 'auto' }}>
+                    {!ventaRapida.done ? (
+                      <>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                          <span style={{ fontSize: 16, fontWeight: 700 }}>🧾 Venta — {ventaRapida.cliente.nombre}</span>
+                          <button onClick={() => setVentaRapida(null)} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: 20, cursor: 'pointer' }}>✕</button>
+                        </div>
+                        <div style={{ fontSize: 11, color: '#64748b', marginBottom: 14 }}>📍 Se guarda con tu ubicación actual, para verificar la visita en campo.</div>
+                        <div style={lblStyle}>Agregar productos</div>
+                        <input value={ventaProdSearch} onChange={e => setVentaProdSearch(e.target.value)} placeholder="Buscar producto…" style={inputStyle} />
+                        <div style={{ maxHeight: 150, overflowY: 'auto', marginBottom: 12 }}>
+                          {productos.filter(p => p.nombre.toLowerCase().includes(ventaProdSearch.toLowerCase())).map(p => (
+                            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid #0f172a' }}>
+                              <div><div style={{ fontSize: 12 }}>{p.nombre}</div><div style={{ fontSize: 10, color: '#38bdf8' }}>{fmtx(p.precio)}</div></div>
+                              <button onClick={() => addProdVenta(p)} style={{ background: '#172554', color: '#60a5fa', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 11, cursor: 'pointer' }}>+ Agregar</button>
+                            </div>
+                          ))}
+                        </div>
+                        {ventaRapida.items.length > 0 && (
+                          <div style={{ marginBottom: 12 }}>
+                            <div style={{ fontSize: 10, color: '#64748b', fontWeight: 700, marginBottom: 6 }}>CARRITO</div>
+                            {ventaRapida.items.map(it => (
+                              <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                <span style={{ fontSize: 12, flex: 1 }}>{it.nombre}</span>
+                                <button onClick={() => updQtyVenta(it.id, it.cant - 1)} style={{ background: '#334155', border: 'none', color: '#f1f5f9', borderRadius: 6, width: 22, height: 22, cursor: 'pointer' }}>-</button>
+                                <input type="number" min="1" value={it.cant} onChange={e => { const v = e.target.value; if (v === '') return; const n = parseInt(v); if (!isNaN(n) && n >= 1) updQtyVenta(it.id, n); }} onBlur={e => { if (!e.target.value || parseInt(e.target.value) < 1) updQtyVenta(it.id, 1); }} style={{ width: 36, textAlign: 'center', fontSize: 12, background: '#0f172a', border: '1px solid #334155', borderRadius: 6, color: '#f1f5f9', padding: '3px 2px' }} />
+                                <button onClick={() => updQtyVenta(it.id, it.cant + 1)} style={{ background: '#334155', border: 'none', color: '#f1f5f9', borderRadius: 6, width: 22, height: 22, cursor: 'pointer' }}>+</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+                          {[['contado', '💵 Contado', '#166534', '#4ade80'], ['credito', '📋 Crédito', '#78350f', '#fcd34d']].map(([v, l, bg, col]) => (
+                            <button key={v} onClick={() => setVentaRapida(vv => ({ ...vv, pago: v }))} style={{ flex: 1, padding: 9, borderRadius: 8, border: 'none', background: ventaRapida.pago === v ? bg : '#0f172a', color: ventaRapida.pago === v ? col : '#94a3b8', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>{l}</button>
+                          ))}
+                        </div>
+                        <button onClick={guardarVentaRapida} disabled={ventaRapida.saving} style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 12, fontWeight: 700, cursor: 'pointer', opacity: ventaRapida.saving ? 0.6 : 1 }}>{ventaRapida.saving ? 'Guardando…' : '💾 Guardar venta'}</button>
+                      </>
+                    ) : (
+                      <div style={{ textAlign: 'center', padding: '10px 0' }}>
+                        <div style={{ fontSize: 44, marginBottom: 8 }}>✅</div>
+                        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>Venta guardada</div>
+                        <div style={{ color: '#94a3b8', marginBottom: 6 }}>{ventaRapida.cliente.nombre} · {fmtx(ventaRapida.done.total)}</div>
+                        <div style={{ fontSize: 11, color: ventaRapida.done.tuvoUbicacion ? '#22c55e' : '#f59e0b', marginBottom: 20 }}>{ventaRapida.done.tuvoUbicacion ? '📍 Ubicación registrada' : '⚠️ No se pudo obtener ubicación'}</div>
+                        {ventaRapida.cliente.telefono && <button onClick={() => window.open(waVentaLink(ventaRapida.cliente, ventaRapida.done.items, ventaRapida.done.total, ventaRapida.done.pago), '_blank')} style={{ width: '100%', background: '#25d366', color: '#052e16', border: 'none', borderRadius: 8, padding: 12, fontWeight: 700, cursor: 'pointer', marginBottom: 10 }}>📲 Enviar ticket por WhatsApp</button>}
+                        <button onClick={() => setVentaRapida(null)} style={{ width: '100%', background: '#0f172a', color: '#94a3b8', border: '1px solid #334155', borderRadius: 8, padding: 12, fontWeight: 700, cursor: 'pointer' }}>Cerrar</button>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
