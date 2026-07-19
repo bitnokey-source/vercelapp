@@ -121,6 +121,98 @@
 
   const inputStyle = { background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: '8px 10px', color: '#f1f5f9', fontSize: 13, width: '100%', boxSizing: 'border-box', marginBottom: 10 };
   const lblStyle = { fontSize: 11, color: '#94a3b8', marginBottom: 3, textTransform: 'uppercase', letterSpacing: '.5px' };
+  const uidx = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+  function totalesParadas(paradas) {
+    const map = {};
+    (paradas || []).forEach(p => (p.items || []).forEach(it => {
+      map[it.id] = map[it.id] || { nombre: it.nombre, cant: 0 };
+      map[it.id].cant += it.cant;
+    }));
+    return Object.values(map);
+  }
+
+  // ---- Armador de paradas: elige cliente + productos a llevar ----
+  function ParadaBuilder({ clientes, productos, paradas, onChange }) {
+    const [cliSearch, setCliSearch] = useState('');
+    const [cliSel, setCliSel] = useState(null);
+    const [prodSearch, setProdSearch] = useState('');
+    const [draftItems, setDraftItems] = useState([]);
+    const cliFilt = clientes.filter(c => c.activo && c.nombre.toLowerCase().includes(cliSearch.toLowerCase()));
+    const prodFilt = productos.filter(p => p.nombre.toLowerCase().includes(prodSearch.toLowerCase()));
+
+    const addProd = p => setDraftItems(items => {
+      const ex = items.find(x => x.id === p.id);
+      return ex ? items.map(x => x.id === p.id ? { ...x, cant: x.cant + 1 } : x) : [...items, { id: p.id, nombre: p.nombre, cant: 1 }];
+    });
+    const updQty = (id, v) => { if (v < 1) { setDraftItems(items => items.filter(x => x.id !== id)); return; } setDraftItems(items => items.map(x => x.id === id ? { ...x, cant: v } : x)); };
+
+    const agregarParada = () => {
+      if (!cliSel || draftItems.length === 0) return;
+      onChange([...(paradas || []), { id: uidx(), clienteId: cliSel.id, clienteNombre: cliSel.nombre, clienteTelefono: cliSel.telefono || '', items: draftItems, visitado: false }]);
+      setCliSel(null); setCliSearch(''); setDraftItems([]); setProdSearch('');
+    };
+    const quitarParada = id => onChange((paradas || []).filter(p => p.id !== id));
+
+    return (
+      <div>
+        {(paradas || []).length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            {paradas.map((p, i) => (
+              <div key={p.id} style={{ background: '#0f172a', borderRadius: 8, padding: '8px 10px', marginBottom: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700 }}>{i + 1}. {p.clienteNombre}</div>
+                  <div style={{ fontSize: 11, color: '#64748b' }}>{p.items.map(it => `${it.nombre} x${it.cant}`).join(', ')}</div>
+                </div>
+                <button onClick={() => quitarParada(p.id)} style={{ background: 'none', border: 'none', color: '#f87171', cursor: 'pointer', fontSize: 14 }}>✕</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={lblStyle}>Cliente a visitar</div>
+        {cliSel ? (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#0f172a', borderRadius: 8, padding: '8px 10px', marginBottom: 10 }}>
+            <span style={{ fontSize: 13, color: '#38bdf8', fontWeight: 700 }}>{cliSel.nombre}</span>
+            <button onClick={() => setCliSel(null)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}>✕</button>
+          </div>
+        ) : (
+          <>
+            <input value={cliSearch} onChange={e => setCliSearch(e.target.value)} placeholder="Buscar cliente…" style={inputStyle} />
+            <div style={{ maxHeight: 130, overflowY: 'auto', marginBottom: 10 }}>
+              {cliFilt.map(c => (
+                <div key={c.id} onClick={() => setCliSel(c)} style={{ padding: '7px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}>{c.nombre}</div>
+              ))}
+            </div>
+          </>
+        )}
+        {cliSel && <>
+          <div style={lblStyle}>Productos a llevar</div>
+          <input value={prodSearch} onChange={e => setProdSearch(e.target.value)} placeholder="Buscar producto…" style={inputStyle} />
+          <div style={{ maxHeight: 130, overflowY: 'auto', marginBottom: 10 }}>
+            {prodFilt.map(p => (
+              <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #0f172a' }}>
+                <span style={{ fontSize: 12 }}>{p.nombre}</span>
+                <button onClick={() => addProd(p)} style={{ background: '#172554', color: '#60a5fa', border: 'none', borderRadius: 6, padding: '3px 9px', fontSize: 11, cursor: 'pointer' }}>+ Agregar</button>
+              </div>
+            ))}
+          </div>
+          {draftItems.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              {draftItems.map(it => (
+                <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 12, flex: 1 }}>{it.nombre}</span>
+                  <button onClick={() => updQty(it.id, it.cant - 1)} style={{ background: '#334155', border: 'none', color: '#f1f5f9', borderRadius: 6, width: 22, height: 22, cursor: 'pointer' }}>-</button>
+                  <span style={{ width: 26, textAlign: 'center', fontSize: 12 }}>{it.cant}</span>
+                  <button onClick={() => updQty(it.id, it.cant + 1)} style={{ background: '#334155', border: 'none', color: '#f1f5f9', borderRadius: 6, width: 22, height: 22, cursor: 'pointer' }}>+</button>
+                </div>
+              ))}
+              <button onClick={agregarParada} style={{ width: '100%', background: '#166534', color: '#4ade80', border: 'none', borderRadius: 8, padding: 9, fontWeight: 700, cursor: 'pointer', fontSize: 12, marginTop: 4 }}>✓ Agregar parada</button>
+            </div>
+          )}
+        </>}
+      </div>
+    );
+  }
 
   function RepartidoresPanel() {
     const [open, setOpen] = useState(false);
@@ -129,6 +221,10 @@
     const [usuarios, setUsuarios] = useState([]);
     const [rutas, setRutas] = useState([]);
     const [rutasReales, setRutasReales] = useState([]);
+    const [productos, setProductos] = useState([]);
+    const [clientes, setClientes] = useState([]);
+    const [planEditFor, setPlanEditFor] = useState(null);
+    const [expandPlan, setExpandPlan] = useState(null);
     const [waFor, setWaFor] = useState(null);
     const [waPhone, setWaPhone] = useState('');
     const [expandComp, setExpandComp] = useState(null);
@@ -166,8 +262,19 @@
       }
       const unsubR = dbx.collection('rutas').orderBy('fecha', 'desc').limit(100)
         .onSnapshot(snap => setRutasReales(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
-      return () => { unsub(); unsubU(); unsubR(); };
+      const unsubP = dbx.collection('productos').onSnapshot(snap => setProductos(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
+      const unsubC = dbx.collection('clientes').onSnapshot(snap => setClientes(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
+      return () => { unsub(); unsubU(); unsubR(); unsubP(); unsubC(); };
     }, [currentUser]);
+
+    const actualizarParadas = async (rutaId, nuevasParadas) => {
+      try { await dbx.collection('rutas_meta').doc(rutaId).update({ paradas: nuevasParadas }); }
+      catch (e) { flash('❌ ' + e.message); }
+    };
+    const toggleVisitado = (r, paradaId) => {
+      const nuevas = (r.paradas || []).map(p => p.id === paradaId ? { ...p, visitado: !p.visitado } : p);
+      actualizarParadas(r.id, nuevas);
+    };
 
     // ---- Mapa ----
     useEffect(() => {
@@ -217,6 +324,7 @@
           fechaRegresoProgramada: form.fechaRegresoProgramada ? new Date(form.fechaRegresoProgramada).toISOString() : '',
           estado: 'pendiente',
           fechaCreacion: new Date().toISOString(),
+          paradas: form.paradas || [],
         });
         setForm(null);
         flash('✅ Ruta programada');
@@ -302,7 +410,7 @@
 
               {tab === 'activas' && (
                 <>
-                  <button onClick={() => setForm({ repartidorId: currentUser.uid, repartidorNombre: currentUser.nombre, vehiculo: '', zona: '', fechaProgramada: '', fechaRegresoProgramada: '' })}
+                  <button onClick={() => setForm({ repartidorId: currentUser.uid, repartidorNombre: currentUser.nombre, vehiculo: '', zona: '', fechaProgramada: '', fechaRegresoProgramada: '', paradas: [] })}
                     style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 10, fontWeight: 700, marginBottom: 14, cursor: 'pointer' }}>+ Programar ruta</button>
                   {misRutas.length === 0 && <div style={{ textAlign: 'center', color: '#475569', padding: '20px 0' }}>Sin rutas programadas</div>}
                   {misRutas.map(r => (
@@ -313,6 +421,38 @@
                       </div>
                       <div style={{ fontSize: 12, color: '#94a3b8' }}>🚐 {r.vehiculo || '—'} · 📍 {r.zona || '—'}</div>
                       <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>{r.estado === 'pendiente' ? 'Programada: ' + fDateTime(r.fechaProgramada) : 'Salió: ' + fDateTime(r.fechaSalidaReal)}</div>
+                      {(r.paradas || []).length > 0 && (
+                        <div style={{ marginBottom: 8 }}>
+                          <button onClick={() => setExpandPlan(expandPlan === r.id ? null : r.id)} style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: 12, cursor: 'pointer', padding: 0, marginBottom: 6 }}>
+                            📋 {r.paradas.filter(p => p.visitado).length}/{r.paradas.length} paradas {expandPlan === r.id ? '▲' : '▼'}
+                          </button>
+                          {expandPlan === r.id && (
+                            <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, marginBottom: 6 }}>
+                              {r.paradas.map(p => (
+                                <div key={p.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
+                                  <button onClick={() => toggleVisitado(r, p.id)} style={{ background: 'none', border: 'none', color: p.visitado ? '#22c55e' : '#475569', cursor: 'pointer', fontSize: 16, flexShrink: 0, marginTop: 1 }}>{p.visitado ? '✅' : '⬜'}</button>
+                                  <div>
+                                    <div style={{ fontSize: 12, fontWeight: 700, textDecoration: p.visitado ? 'line-through' : 'none', color: p.visitado ? '#64748b' : '#f1f5f9' }}>{p.clienteNombre}</div>
+                                    <div style={{ fontSize: 11, color: '#64748b' }}>{p.items.map(it => `${it.nombre} x${it.cant}`).join(', ')}</div>
+                                  </div>
+                                </div>
+                              ))}
+                              <div style={{ borderTop: '1px solid #334155', paddingTop: 8, marginTop: 4 }}>
+                                <div style={{ fontSize: 10, color: '#64748b', fontWeight: 700, marginBottom: 3 }}>PARA CARGAR EN TOTAL</div>
+                                {totalesParadas(r.paradas).map((it, i) => <div key={i} style={{ fontSize: 11, color: '#94a3b8' }}>• {it.nombre} x{it.cant}</div>)}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {(r.estado === 'pendiente' || r.estado === 'en_curso') && (planEditFor === r.id ? (
+                        <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                          <ParadaBuilder clientes={clientes} productos={productos} paradas={r.paradas} onChange={ps => actualizarParadas(r.id, ps)} />
+                          <button onClick={() => setPlanEditFor(null)} style={{ width: '100%', background: '#1e293b', color: '#94a3b8', border: 'none', borderRadius: 8, padding: 8, fontSize: 12, cursor: 'pointer', marginTop: 4 }}>Listo</button>
+                        </div>
+                      ) : (
+                        <button onClick={() => setPlanEditFor(r.id)} style={{ background: 'transparent', color: '#94a3b8', border: '1px dashed #334155', borderRadius: 8, padding: '6px 10px', fontSize: 11, cursor: 'pointer', marginBottom: 8, width: '100%' }}>+ Agregar cliente al plan</button>
+                      ))}
                       <div style={{ display: 'flex', gap: 8 }}>
                         {r.estado === 'pendiente' && <button onClick={() => iniciar(r)} style={{ flex: 1, background: '#166534', color: '#4ade80', border: 'none', borderRadius: 8, padding: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>🚀 Iniciar</button>}
                         {r.estado === 'pendiente' && <button onClick={() => cancelar(r)} style={{ background: 'transparent', color: '#ef4444', border: '1.5px solid #ef4444', borderRadius: 8, padding: '7px 12px', fontSize: 12, cursor: 'pointer' }}>✕</button>}
@@ -413,8 +553,11 @@
                     <div style={lblStyle}>Salida programada</div>
                     <input type="datetime-local" value={form.fechaProgramada} onChange={e => setForm(f => ({ ...f, fechaProgramada: e.target.value }))} style={inputStyle} />
                     <div style={lblStyle}>Regreso estimado (opcional)</div>
-                    <input type="datetime-local" value={form.fechaRegresoProgramada} onChange={e => setForm(f => ({ ...f, fechaRegresoProgramada: e.target.value }))} style={{ ...inputStyle, marginBottom: 16 }} />
-                    <button onClick={crear} style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 12, fontWeight: 700, cursor: 'pointer' }}>💾 Guardar</button>
+                    <input type="datetime-local" value={form.fechaRegresoProgramada} onChange={e => setForm(f => ({ ...f, fechaRegresoProgramada: e.target.value }))} style={inputStyle} />
+                    <div style={{ borderTop: '1px solid #334155', margin: '14px 0' }} />
+                    <div style={lblStyle}>Clientes y productos por visitar</div>
+                    <ParadaBuilder clientes={clientes} productos={productos} paradas={form.paradas} onChange={ps => setForm(f => ({ ...f, paradas: ps }))} />
+                    <button onClick={crear} style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 12, fontWeight: 700, cursor: 'pointer', marginTop: 6 }}>💾 Guardar</button>
                   </div>
                 </div>
               )}
