@@ -1,0 +1,436 @@
+/* rutas-repartidores.js — Productos de la Costa
+ * Módulo independiente: asigna repartidor/vehículo/zona/fecha a una ruta,
+ * maneja estados (pendiente → en_curso → completada/cancelada) y
+ * geolocalización en vivo (inicio, fin, tracking mientras está en curso).
+ *
+ * No modifica index.html ni la colección `rutas` que ya usa la pantalla
+ * "Ruta de reparto" (cargar camión / entregas). Guarda su propia
+ * colección `rutas_meta` en Firestore, así que es 100% aditivo.
+ *
+ * Integración en index.html: agrega esta línea justo después del
+ * <script type="text/babel"> principal (antes del script de registro
+ * del Service Worker):
+ *
+ *   <script type="text/babel" src="./rutas-repartidores.js"></script>
+ */
+(function () {
+  'use strict';
+
+  // ---- Carga de Leaflet (mapa) bajo demanda, sin tocar el <head> original ----
+  let leafletLoading = false;
+  function ensureLeaflet(cb) {
+    if (window.L) { cb(); return; }
+    if (!document.getElementById('leaflet-css')) {
+      const link = document.createElement('link');
+      link.id = 'leaflet-css';
+      link.rel = 'stylesheet';
+      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(link);
+    }
+    if (leafletLoading) {
+      const check = setInterval(() => { if (window.L) { clearInterval(check); cb(); } }, 200);
+      return;
+    }
+    leafletLoading = true;
+    const script = document.createElement('script');
+    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    script.onload = () => { leafletLoading = false; cb(); };
+    script.onerror = () => { leafletLoading = false; cb(); };
+    document.body.appendChild(script);
+  }
+
+  // ---- Firebase: reutiliza la app ya inicializada por index.html ----
+  const fbApp = firebase.app();
+  const dbx = fbApp.firestore();
+  const authx = fbApp.auth();
+
+  const { useState, useEffect, useRef } = React;
+
+  const fDateTime = d => d ? new Date(d).toLocaleString('es-MX', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+  const fmtx = n => '$' + Number(n || 0).toFixed(2);
+
+  // ---- Comprobante / guía de ruta ----
+  function itemsCargadosDe(r) {
+    if (Array.isArray(r.items)) return r.items.map(it => ({ nombre: it.nombre, cant: it.cant }));
+    return Object.values(r.items || {}).map(it => ({ nombre: it.nombre, cant: it.cantCargada }));
+  }
+  function resumenRuta(r) {
+    const entregas = r.entregas || [];
+    const totalVendido = entregas.reduce((s, e) => s + (e.total || 0), 0);
+    return { entregas, totalVendido, cargados: itemsCargadosDe(r) };
+  }
+  function guiaHTML(r) {
+    const { entregas, totalVendido, cargados } = resumenRuta(r);
+    const filasCargados = cargados.map(it => `<tr><td>${it.nombre}</td><td style="text-align:right">${it.cant}</td></tr>`).join('');
+    const filasEntregas = entregas.map(e => `<tr><td>${e.clienteNombre}</td><td>${(e.items || []).length} prod.</td><td>${e.formaPago}</td><td style="text-align:right">${fmtx(e.total)}</td></tr>`).join('');
+    return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Guía de ruta — ${fDateTime(r.fecha)}</title>
+      <style>
+        *{box-sizing:border-box;font-family:system-ui,-apple-system,sans-serif}
+        body{padding:24px;color:#0f172a;max-width:640px;margin:0 auto}
+        h1{font-size:20px;margin-bottom:2px}
+        h2{font-size:13px;color:#475569;font-weight:600;margin:20px 0 8px;text-transform:uppercase;letter-spacing:.5px}
+        .sub{color:#64748b;font-size:13px;margin-bottom:16px}
+        table{width:100%;border-collapse:collapse;font-size:13px}
+        td,th{padding:6px 4px;border-bottom:1px solid #e2e8f0;text-align:left}
+        .total{font-size:18px;font-weight:800;text-align:right;margin-top:10px}
+        @media print{ button{display:none} }
+      </style></head><body>
+      <h1>🚚 Guía de ruta</h1>
+      <div class="sub">${fDateTime(r.fecha)} · Estado: ${r.estado === 'activa' ? 'en curso' : (r.estado || 'cerrada')}</div>
+      <h2>Productos cargados</h2>
+      <table>${filasCargados || '<tr><td>Sin productos</td></tr>'}</table>
+      <h2>Entregas (${entregas.length})</h2>
+      <table>${filasEntregas || '<tr><td>Sin entregas registradas</td></tr>'}</table>
+      <div class="total">Total vendido: ${fmtx(totalVendido)}</div>
+      <button onclick="window.print()" style="margin-top:20px;background:#38bdf8;border:none;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer">🖨️ Imprimir</button>
+      </body></html>`;
+  }
+  function imprimirGuia(r) {
+    const w = window.open('', '_blank');
+    if (!w) { alert('Habilita las ventanas emergentes para imprimir la guía.'); return; }
+    w.document.write(guiaHTML(r));
+    w.document.close();
+  }
+  function waGuiaLink(r, telefono) {
+    const { entregas, totalVendido, cargados } = resumenRuta(r);
+    const lineasCarga = cargados.map(it => `• ${it.nombre} x${it.cant}`).join('\n');
+    const lineasEnt = entregas.map(e => `• ${e.clienteNombre}: ${fmtx(e.total)} (${e.formaPago})`).join('\n');
+    const texto = `🚚 *GUÍA DE RUTA*\n📅 ${fDateTime(r.fecha)}\n\n*Cargamento:*\n${lineasCarga || 'Sin productos'}\n\n*Entregas (${entregas.length}):*\n${lineasEnt || 'Sin entregas'}\n\n💰 *Total vendido: ${fmtx(totalVendido)}*`;
+    let tel = (telefono || '').replace(/\D/g, '');
+    if (tel && !tel.startsWith('52') && tel.length <= 10) tel = '52' + tel;
+    return `https://wa.me/${tel}?text=${encodeURIComponent(texto)}`;
+  }
+
+  const ESTADOS = {
+    pendiente: { label: 'Pendiente', color: '#94a3b8' },
+    en_curso: { label: 'En curso', color: '#38bdf8' },
+    completada: { label: 'Completada', color: '#22c55e' },
+    cancelada: { label: 'Cancelada', color: '#ef4444' },
+  };
+
+  function getLoc() {
+    return new Promise(res => {
+      if (!navigator.geolocation) { res(null); return; }
+      navigator.geolocation.getCurrentPosition(
+        p => res({ lat: p.coords.latitude, lng: p.coords.longitude, fecha: new Date().toISOString() }),
+        () => res(null),
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    });
+  }
+
+  const inputStyle = { background: '#0f172a', border: '1px solid #334155', borderRadius: 8, padding: '8px 10px', color: '#f1f5f9', fontSize: 13, width: '100%', boxSizing: 'border-box', marginBottom: 10 };
+  const lblStyle = { fontSize: 11, color: '#94a3b8', marginBottom: 3, textTransform: 'uppercase', letterSpacing: '.5px' };
+
+  function RepartidoresPanel() {
+    const [open, setOpen] = useState(false);
+    const [tab, setTab] = useState('activas');
+    const [currentUser, setCurrentUser] = useState(null);
+    const [usuarios, setUsuarios] = useState([]);
+    const [rutas, setRutas] = useState([]);
+    const [rutasReales, setRutasReales] = useState([]);
+    const [waFor, setWaFor] = useState(null);
+    const [waPhone, setWaPhone] = useState('');
+    const [expandComp, setExpandComp] = useState(null);
+    const [form, setForm] = useState(null);
+    const [msg, setMsg] = useState('');
+    const [mapReady, setMapReady] = useState(false);
+    const mapRef = useRef(null);
+    const mapInstance = useRef(null);
+    const markersRef = useRef({});
+    const watchIdRef = useRef(null);
+    const [tracking, setTracking] = useState(null);
+
+    const flash = m => { setMsg(m); setTimeout(() => setMsg(''), 3000); };
+
+    useEffect(() => {
+      const unsub = authx.onAuthStateChanged(async u => {
+        if (!u) { setCurrentUser(null); return; }
+        try {
+          const snap = await dbx.collection('usuarios').doc(u.uid).get();
+          setCurrentUser({ uid: u.uid, ...(snap.exists ? snap.data() : { nombre: u.email, email: u.email, role: 'usuario' }) });
+        } catch (e) {
+          setCurrentUser({ uid: u.uid, nombre: u.email, email: u.email, role: 'usuario' });
+        }
+      });
+      return unsub;
+    }, []);
+
+    useEffect(() => {
+      if (!currentUser) return;
+      const unsub = dbx.collection('rutas_meta').orderBy('fechaCreacion', 'desc').limit(200)
+        .onSnapshot(snap => setRutas(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
+      let unsubU = () => {};
+      if (currentUser.role === 'admin') {
+        unsubU = dbx.collection('usuarios').onSnapshot(snap => setUsuarios(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
+      }
+      const unsubR = dbx.collection('rutas').orderBy('fecha', 'desc').limit(100)
+        .onSnapshot(snap => setRutasReales(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
+      return () => { unsub(); unsubU(); unsubR(); };
+    }, [currentUser]);
+
+    // ---- Mapa ----
+    useEffect(() => {
+      if (!open || tab !== 'mapa') return;
+      ensureLeaflet(() => {
+        if (!window.L || !mapRef.current) return;
+        setTimeout(() => {
+          if (!mapInstance.current && mapRef.current) {
+            mapInstance.current = window.L.map(mapRef.current).setView([23.6, -102.5], 5);
+            window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(mapInstance.current);
+          }
+          setMapReady(true);
+          if (mapInstance.current) setTimeout(() => mapInstance.current.invalidateSize(), 100);
+        }, 50);
+      });
+    }, [open, tab]);
+
+    useEffect(() => {
+      if (!mapReady || !mapInstance.current) return;
+      const activas = rutas.filter(r => r.estado === 'en_curso' && r.ubicacionActual);
+      Object.keys(markersRef.current).forEach(id => {
+        if (!activas.find(r => r.id === id)) { mapInstance.current.removeLayer(markersRef.current[id]); delete markersRef.current[id]; }
+      });
+      const pts = [];
+      activas.forEach(r => {
+        const { lat, lng } = r.ubicacionActual;
+        pts.push([lat, lng]);
+        const popup = `<b>${r.repartidorNombre || '—'}</b><br/>${r.vehiculo || ''}<br/>${r.zona || ''}`;
+        if (markersRef.current[r.id]) {
+          markersRef.current[r.id].setLatLng([lat, lng]).setPopupContent(popup);
+        } else {
+          markersRef.current[r.id] = window.L.marker([lat, lng]).addTo(mapInstance.current).bindPopup(popup);
+        }
+      });
+      if (pts.length) mapInstance.current.fitBounds(pts, { maxZoom: 14, padding: [30, 30] });
+    }, [rutas, mapReady]);
+
+    const crear = async () => {
+      if (!form.repartidorNombre) { flash('⚠️ Falta el repartidor'); return; }
+      try {
+        await dbx.collection('rutas_meta').add({
+          repartidorId: form.repartidorId || currentUser.uid,
+          repartidorNombre: form.repartidorNombre,
+          vehiculo: form.vehiculo || '',
+          zona: form.zona || '',
+          fechaProgramada: form.fechaProgramada ? new Date(form.fechaProgramada).toISOString() : '',
+          fechaRegresoProgramada: form.fechaRegresoProgramada ? new Date(form.fechaRegresoProgramada).toISOString() : '',
+          estado: 'pendiente',
+          fechaCreacion: new Date().toISOString(),
+        });
+        setForm(null);
+        flash('✅ Ruta programada');
+      } catch (e) { flash('❌ ' + e.message); }
+    };
+
+    const iniciar = async r => {
+      const loc = await getLoc();
+      try {
+        await dbx.collection('rutas_meta').doc(r.id).update({
+          estado: 'en_curso',
+          fechaSalidaReal: new Date().toISOString(),
+          ...(loc ? { ubicacionInicio: loc, ubicacionActual: loc } : {}),
+        });
+        flash('🚀 Ruta iniciada');
+      } catch (e) { flash('❌ ' + e.message); }
+    };
+
+    const completar = async r => {
+      if (tracking === r.id) detenerSeguimiento();
+      const loc = await getLoc();
+      try {
+        await dbx.collection('rutas_meta').doc(r.id).update({
+          estado: 'completada',
+          fechaRegresoReal: new Date().toISOString(),
+          ...(loc ? { ubicacionFin: loc } : {}),
+        });
+        flash('🏁 Ruta completada');
+      } catch (e) { flash('❌ ' + e.message); }
+    };
+
+    const cancelar = async r => {
+      if (!confirm('¿Cancelar esta ruta programada?')) return;
+      await dbx.collection('rutas_meta').doc(r.id).update({ estado: 'cancelada' });
+      flash('Ruta cancelada');
+    };
+
+    const iniciarSeguimiento = r => {
+      if (!navigator.geolocation) { flash('⚠️ Este dispositivo no soporta GPS'); return; }
+      if (watchIdRef.current) navigator.geolocation.clearWatch(watchIdRef.current);
+      let last = 0;
+      watchIdRef.current = navigator.geolocation.watchPosition(p => {
+        const now = Date.now();
+        if (now - last < 20000) return; // throttle: máx. 1 escritura cada 20s
+        last = now;
+        dbx.collection('rutas_meta').doc(r.id).update({
+          ubicacionActual: { lat: p.coords.latitude, lng: p.coords.longitude, fecha: new Date().toISOString() }
+        }).catch(() => {});
+      }, () => flash('⚠️ No se pudo obtener ubicación'), { enableHighAccuracy: true });
+      setTracking(r.id);
+      flash('📍 Compartiendo ubicación en vivo');
+    };
+    const detenerSeguimiento = () => {
+      if (watchIdRef.current) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
+      setTracking(null);
+    };
+    useEffect(() => () => { if (watchIdRef.current) navigator.geolocation.clearWatch(watchIdRef.current); }, []);
+
+    if (!currentUser) return null;
+
+    const activas = rutas.filter(r => r.estado === 'pendiente' || r.estado === 'en_curso');
+    const hist = rutas.filter(r => r.estado === 'completada' || r.estado === 'cancelada');
+    const misRutas = currentUser.role === 'admin' ? activas : activas.filter(r => r.repartidorId === currentUser.uid);
+
+    return (
+      <>
+        {!open && (
+          <button onClick={() => setOpen(true)} style={{ position: 'fixed', bottom: 84, right: 'max(14px, calc(50vw - 196px))', zIndex: 260, width: 52, height: 52, borderRadius: 26, background: '#38bdf8', border: 'none', color: '#0f172a', fontSize: 22, boxShadow: '0 4px 14px #000a', cursor: 'pointer' }}>🗺️</button>
+        )}
+        {open && (
+          <div style={{ position: 'fixed', inset: 0, background: '#0f172a', zIndex: 280, overflowY: 'auto' }}>
+            <div style={{ maxWidth: 420, margin: '0 auto', padding: '16px 12px 90px', color: '#f1f5f9', fontFamily: 'system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                <div style={{ fontSize: 20, fontWeight: 800 }}>🗺️ Repartidores y rutas</div>
+                <button onClick={() => setOpen(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: 22, cursor: 'pointer' }}>✕</button>
+              </div>
+              {msg && <div style={{ background: '#14532d', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: '#4ade80', marginBottom: 12 }}>{msg}</div>}
+              <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+                {[['activas', 'Activas'], ['mapa', 'Mapa'], ['comprobantes', 'Comprobantes'], ['historial', 'Historial']].map(([v, l]) => (
+                  <button key={v} onClick={() => setTab(v)} style={{ flex: 1, padding: '8px 2px', borderRadius: 8, border: 'none', background: tab === v ? '#38bdf8' : '#1e293b', color: tab === v ? '#0f172a' : '#94a3b8', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>{l}</button>
+                ))}
+              </div>
+
+              {tab === 'activas' && (
+                <>
+                  <button onClick={() => setForm({ repartidorId: currentUser.uid, repartidorNombre: currentUser.nombre, vehiculo: '', zona: '', fechaProgramada: '', fechaRegresoProgramada: '' })}
+                    style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 10, fontWeight: 700, marginBottom: 14, cursor: 'pointer' }}>+ Programar ruta</button>
+                  {misRutas.length === 0 && <div style={{ textAlign: 'center', color: '#475569', padding: '20px 0' }}>Sin rutas programadas</div>}
+                  {misRutas.map(r => (
+                    <div key={r.id} style={{ background: '#1e293b', borderRadius: 12, padding: 14, marginBottom: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                        <span style={{ fontWeight: 700, fontSize: 14 }}>{r.repartidorNombre}</span>
+                        <span style={{ background: ESTADOS[r.estado].color + '22', color: ESTADOS[r.estado].color, borderRadius: 20, padding: '2px 9px', fontSize: 11, fontWeight: 700 }}>{ESTADOS[r.estado].label}</span>
+                      </div>
+                      <div style={{ fontSize: 12, color: '#94a3b8' }}>🚐 {r.vehiculo || '—'} · 📍 {r.zona || '—'}</div>
+                      <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>{r.estado === 'pendiente' ? 'Programada: ' + fDateTime(r.fechaProgramada) : 'Salió: ' + fDateTime(r.fechaSalidaReal)}</div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        {r.estado === 'pendiente' && <button onClick={() => iniciar(r)} style={{ flex: 1, background: '#166534', color: '#4ade80', border: 'none', borderRadius: 8, padding: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>🚀 Iniciar</button>}
+                        {r.estado === 'pendiente' && <button onClick={() => cancelar(r)} style={{ background: 'transparent', color: '#ef4444', border: '1.5px solid #ef4444', borderRadius: 8, padding: '7px 12px', fontSize: 12, cursor: 'pointer' }}>✕</button>}
+                        {r.estado === 'en_curso' && <button onClick={() => tracking === r.id ? detenerSeguimiento() : iniciarSeguimiento(r)} style={{ flex: 1, background: tracking === r.id ? '#78350f' : '#0f172a', color: tracking === r.id ? '#fcd34d' : '#94a3b8', border: '1px solid #334155', borderRadius: 8, padding: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>{tracking === r.id ? '📍 Compartiendo…' : '📍 Compartir ubicación'}</button>}
+                        {r.estado === 'en_curso' && <button onClick={() => completar(r)} style={{ flex: 1, background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>🏁 Completar</button>}
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+
+              {tab === 'mapa' && (
+                <div>
+                  <div ref={mapRef} style={{ width: '100%', height: 380, borderRadius: 12, background: '#1e293b' }} />
+                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 8, textAlign: 'center' }}>Muestra las rutas en curso que están compartiendo ubicación en vivo.</div>
+                </div>
+              )}
+
+              {tab === 'comprobantes' && (
+                <>
+                  {rutasReales.length === 0 && <div style={{ textAlign: 'center', color: '#475569', padding: '20px 0' }}>Sin rutas cargadas aún</div>}
+                  {rutasReales.map(r => {
+                    const { entregas, totalVendido } = resumenRuta(r);
+                    return (
+                      <div key={r.id} style={{ background: '#1e293b', borderRadius: 12, padding: 14, marginBottom: 10 }}>
+                        <button onClick={() => setExpandComp(expandComp === r.id ? null : r.id)} style={{ background: 'none', border: 'none', color: '#f1f5f9', width: '100%', textAlign: 'left', cursor: 'pointer', padding: 0 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                            <span style={{ fontSize: 12, color: '#94a3b8' }}>{fDateTime(r.fecha)}</span>
+                            <span style={{ background: (r.estado === 'activa' ? '#38bdf8' : '#64748b') + '22', color: r.estado === 'activa' ? '#38bdf8' : '#64748b', borderRadius: 20, padding: '2px 9px', fontSize: 11, fontWeight: 700 }}>{r.estado === 'activa' ? 'en curso' : 'cerrada'}</span>
+                          </div>
+                          <div style={{ fontSize: 13, fontWeight: 700 }}>{entregas.length} entrega(s) · <span style={{ color: '#38bdf8' }}>{fmtx(totalVendido)}</span></div>
+                        </button>
+                        {expandComp === r.id && (
+                          <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #334155' }}>
+                            <div style={{ fontSize: 11, color: '#64748b', fontWeight: 700, marginBottom: 4 }}>CARGADO</div>
+                            {itemsCargadosDe(r).map((it, i) => <div key={i} style={{ fontSize: 12, color: '#cbd5e1' }}>• {it.nombre} x{it.cant}</div>)}
+                            {entregas.length > 0 && <>
+                              <div style={{ fontSize: 11, color: '#64748b', fontWeight: 700, marginTop: 8, marginBottom: 4 }}>ENTREGAS</div>
+                              {entregas.map((e, i) => <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3 }}><span>{e.clienteNombre}</span><span style={{ color: '#38bdf8', fontWeight: 700 }}>{fmtx(e.total)}</span></div>)}
+                            </>}
+                          </div>
+                        )}
+                        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                          <button onClick={() => imprimirGuia(r)} style={{ flex: 1, background: '#0f172a', color: '#94a3b8', border: '1px solid #334155', borderRadius: 8, padding: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>🖨️ Imprimir</button>
+                          <button onClick={() => { setWaFor(waFor === r.id ? null : r.id); setWaPhone(''); }} style={{ flex: 1, background: '#14532d', color: '#4ade80', border: 'none', borderRadius: 8, padding: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>📲 WhatsApp</button>
+                        </div>
+                        {waFor === r.id && (
+                          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                            <input value={waPhone} onChange={e => setWaPhone(e.target.value)} placeholder="Teléfono (10 dígitos)" style={{ ...inputStyle, marginBottom: 0, flex: 1 }} />
+                            <button onClick={() => { window.open(waGuiaLink(r, waPhone), '_blank'); setWaFor(null); }} style={{ background: '#25d366', color: '#052e16', border: 'none', borderRadius: 8, padding: '0 14px', fontWeight: 700, cursor: 'pointer' }}>➤</button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+
+              {tab === 'historial' && (
+                <>
+                  {hist.length === 0 && <div style={{ textAlign: 'center', color: '#475569', padding: '20px 0' }}>Sin historial aún</div>}
+                  {hist.map(r => {
+                    const dur = (r.fechaSalidaReal && r.fechaRegresoReal) ? Math.round((new Date(r.fechaRegresoReal) - new Date(r.fechaSalidaReal)) / 60000) + ' min' : '—';
+                    return (
+                      <div key={r.id} style={{ background: '#1e293b', borderRadius: 12, padding: 14, marginBottom: 10 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                          <span style={{ fontWeight: 700, fontSize: 14 }}>{r.repartidorNombre}</span>
+                          <span style={{ background: ESTADOS[r.estado].color + '22', color: ESTADOS[r.estado].color, borderRadius: 20, padding: '2px 9px', fontSize: 11, fontWeight: 700 }}>{ESTADOS[r.estado].label}</span>
+                        </div>
+                        <div style={{ fontSize: 12, color: '#94a3b8' }}>🚐 {r.vehiculo || '—'} · 📍 {r.zona || '—'} · ⏱ {dur}</div>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+
+              {form && (
+                <div style={{ position: 'fixed', inset: 0, background: '#000c', zIndex: 300, display: 'flex', alignItems: 'flex-end' }}>
+                  <div style={{ background: '#1e293b', width: '100%', maxWidth: 420, margin: '0 auto', borderRadius: '18px 18px 0 0', padding: 20, maxHeight: '85vh', overflowY: 'auto' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+                      <span style={{ fontSize: 16, fontWeight: 700 }}>Programar ruta</span>
+                      <button onClick={() => setForm(null)} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: 20, cursor: 'pointer' }}>✕</button>
+                    </div>
+                    {currentUser.role === 'admin' ? (
+                      <>
+                        <div style={lblStyle}>Repartidor</div>
+                        <select value={form.repartidorId} onChange={e => { const u = usuarios.find(x => x.id === e.target.value); setForm(f => ({ ...f, repartidorId: e.target.value, repartidorNombre: u ? u.nombre : '' })); }} style={inputStyle}>
+                          {usuarios.map(u => <option key={u.id} value={u.id}>{u.nombre}</option>)}
+                        </select>
+                      </>
+                    ) : (
+                      <div style={{ fontSize: 13, marginBottom: 10, color: '#38bdf8' }}>👤 {currentUser.nombre}</div>
+                    )}
+                    <div style={lblStyle}>Vehículo</div>
+                    <input value={form.vehiculo} onChange={e => setForm(f => ({ ...f, vehiculo: e.target.value }))} placeholder="Camioneta blanca, placas…" style={inputStyle} />
+                    <div style={lblStyle}>Zona / colonia</div>
+                    <input value={form.zona} onChange={e => setForm(f => ({ ...f, zona: e.target.value }))} placeholder="Centro, Col. Reforma…" style={inputStyle} />
+                    <div style={lblStyle}>Salida programada</div>
+                    <input type="datetime-local" value={form.fechaProgramada} onChange={e => setForm(f => ({ ...f, fechaProgramada: e.target.value }))} style={inputStyle} />
+                    <div style={lblStyle}>Regreso estimado (opcional)</div>
+                    <input type="datetime-local" value={form.fechaRegresoProgramada} onChange={e => setForm(f => ({ ...f, fechaRegresoProgramada: e.target.value }))} style={{ ...inputStyle, marginBottom: 16 }} />
+                    <button onClick={crear} style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 12, fontWeight: 700, cursor: 'pointer' }}>💾 Guardar</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  function mount() {
+    const div = document.createElement('div');
+    div.id = 'rutas-repartidores-root';
+    document.body.appendChild(div);
+    ReactDOM.createRoot(div).render(<RepartidoresPanel />);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount);
+  else mount();
+})();

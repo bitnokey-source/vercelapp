@@ -3,13 +3,14 @@
 // Los DATOS (productos, clientes, etc.) los maneja Firestore con enablePersistence()
 // en el propio HTML — este SW no toca esos datos.
 
-const CACHE_NAME = 'distribupanel-shell-v2'; // ⬆️ sube este número si cambias la lista de abajo
+const CACHE_NAME = 'distribupanel-shell-v3'; // ⬆️ sube este número si cambias la lista de abajo
 
 // Ajusta la ruta de tu HTML principal si tu index no se llama exactamente así.
 const SHELL_URLS = [
   './',
   './index.html',
   './offline.html',
+  './rutas-repartidores.js',
   'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js',
@@ -17,6 +18,8 @@ const SHELL_URLS = [
   'https://cdn.jsdelivr.net/npm/firebase@10.13.0/firebase-auth-compat.js',
   'https://cdn.jsdelivr.net/npm/firebase@10.13.0/firebase-firestore-compat.js',
   'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js',
+  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
 ];
 
 // --- Instalación: precachea el shell ---
