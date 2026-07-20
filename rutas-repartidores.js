@@ -766,7 +766,7 @@
               </div>
               {msg && <div style={{ background: '#14532d', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: '#4ade80', marginBottom: 12 }}>{msg}</div>}
               <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
-                {[['activas', 'Activas'], ['mapa', 'Mapa'], ['clientesqr', 'Clientes'], ['inventario', 'Inv.'], ['comprobantes', 'Comprob.'], ['historial', 'Historial']].map(([v, l]) => (
+                {[['activas', 'Activas'], ['mapa', 'Mapa'], ['clientesqr', 'Clientes'], ['inventario', 'Inv.'], ['comprobantes', 'Comprob.'], ['historial', 'Historial']].filter(([v]) => v !== 'mapa' || currentUser.role === 'admin').map(([v, l]) => (
                   <button key={v} onClick={() => setTab(v)} style={{ flex: 1, padding: '8px 1px', borderRadius: 8, border: 'none', background: tab === v ? '#38bdf8' : '#1e293b', color: tab === v ? '#0f172a' : '#94a3b8', fontSize: 9, fontWeight: 700, cursor: 'pointer' }}>{l}</button>
                 ))}
               </div>
@@ -849,7 +849,7 @@
                 </>
               )}
 
-              {tab === 'mapa' && (
+              {tab === 'mapa' && currentUser.role === 'admin' && (
                 <div>
                   <div ref={mapRef} style={{ width: '100%', height: 380, borderRadius: 12, background: '#1e293b' }} />
                   <div style={{ fontSize: 11, color: '#64748b', marginTop: 8, textAlign: 'center' }}>Muestra las rutas en curso que están compartiendo ubicación en vivo.</div>
