@@ -383,6 +383,15 @@
     const [devMotivo, setDevMotivo] = useState('dañado');
     const [devAccion, setDevAccion] = useState('reingreso');
     const [devSaving, setDevSaving] = useState(false);
+    const [respaldoSubTab, setRespaldoSubTab] = useState('respaldo');
+    const [backupMeta, setBackupMeta] = useState(null);
+    const [backupGenerating, setBackupGenerating] = useState(false);
+    const [reporteRango, setReporteRango] = useState('semana');
+    const [reporteDesde, setReporteDesde] = useState('');
+    const [reporteHasta, setReporteHasta] = useState('');
+    const [reporteData, setReporteData] = useState(null);
+    const [reporteGenerating, setReporteGenerating] = useState(false);
+    const [reporteEmail, setReporteEmail] = useState('');
 
     const flash = m => { setMsg(m); setTimeout(() => setMsg(''), 3000); };
 
@@ -412,7 +421,11 @@
       const unsubP = dbx.collection('productos').onSnapshot(snap => setProductos(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
       const unsubC = dbx.collection('clientes').onSnapshot(snap => setClientes(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
       const unsubD = dbx.collection('devoluciones').orderBy('fecha', 'desc').limit(100).onSnapshot(snap => setDevoluciones(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
-      return () => { unsub(); unsubU(); unsubR(); unsubP(); unsubC(); unsubD(); };
+      let unsubB = () => {};
+      if (currentUser.role === 'admin') {
+        unsubB = dbx.collection('_meta').doc('backups').onSnapshot(snap => setBackupMeta(snap.exists ? snap.data() : null), () => {});
+      }
+      return () => { unsub(); unsubU(); unsubR(); unsubP(); unsubC(); unsubD(); unsubB(); };
     }, [currentUser]);
 
     const actualizarParadas = async (rutaId, nuevasParadas) => {
@@ -725,6 +738,97 @@
       downloadCSV('ventas_detalladas_' + Date.now() + '.csv', rows);
     };
 
+    // ---- Respaldo completo ----
+    const diasDesdeUltimoRespaldo = backupMeta && backupMeta.ultimoRespaldo
+      ? Math.floor((Date.now() - new Date(backupMeta.ultimoRespaldo).getTime()) / 86400000)
+      : null;
+
+    const generarRespaldo = async () => {
+      setBackupGenerating(true);
+      try {
+        const colecciones = ['productos', 'clientes', 'notas', 'creditos', 'rutas', 'rutas_meta', 'devoluciones', 'inventario_historial', 'usuarios'];
+        const data = { generado: new Date().toISOString(), generadoPor: currentUser.nombre || currentUser.email };
+        for (const col of colecciones) {
+          const snap = await dbx.collection(col).get();
+          data[col] = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        }
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'respaldo_productos_de_la_costa_' + new Date().toISOString().slice(0, 10) + '.json';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+        await dbx.collection('_meta').doc('backups').set({ ultimoRespaldo: new Date().toISOString(), por: currentUser.nombre || currentUser.email }, { merge: true });
+        flash('✅ Respaldo descargado');
+      } catch (e) { flash('❌ ' + e.message); }
+      setBackupGenerating(false);
+    };
+
+    // ---- Reporte de ventas ----
+    const rangoFechas = () => {
+      const hoy = new Date();
+      let desde, hasta;
+      if (reporteRango === 'hoy') {
+        desde = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate());
+        hasta = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate(), 23, 59, 59);
+      } else if (reporteRango === 'semana') {
+        desde = new Date(hoy); desde.setDate(hoy.getDate() - 7);
+        hasta = hoy;
+      } else if (reporteRango === 'mes') {
+        desde = new Date(hoy); desde.setDate(hoy.getDate() - 30);
+        hasta = hoy;
+      } else {
+        desde = reporteDesde ? new Date(reporteDesde) : new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+        hasta = reporteHasta ? new Date(reporteHasta + 'T23:59:59') : hoy;
+      }
+      return { desde: desde.toISOString(), hasta: hasta.toISOString() };
+    };
+
+    const generarReporte = async () => {
+      setReporteGenerating(true);
+      try {
+        const { desde, hasta } = rangoFechas();
+        const snap = await dbx.collection('notas').where('fecha', '>=', desde).where('fecha', '<=', hasta).get();
+        const notas = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const total = notas.reduce((s, n) => s + (n.total || 0), 0);
+        const totalContado = notas.filter(n => n.formaPago === 'contado').reduce((s, n) => s + (n.total || 0), 0);
+        const totalCredito = notas.filter(n => n.formaPago === 'credito').reduce((s, n) => s + (n.total || 0), 0);
+        const porCliente = {};
+        const porProducto = {};
+        notas.forEach(n => {
+          porCliente[n.clienteNombre] = (porCliente[n.clienteNombre] || 0) + (n.total || 0);
+          (n.items || []).forEach(it => {
+            porProducto[it.nombre] = porProducto[it.nombre] || { cant: 0, total: 0 };
+            porProducto[it.nombre].cant += it.cant;
+            porProducto[it.nombre].total += (it.precio || 0) * it.cant;
+          });
+        });
+        const topClientes = Object.entries(porCliente).sort((a, b) => b[1] - a[1]).slice(0, 5);
+        const topProductos = Object.entries(porProducto).sort((a, b) => b[1].total - a[1].total).slice(0, 5);
+        setReporteData({ desde, hasta, notas, total, totalContado, totalCredito, count: notas.length, topClientes, topProductos });
+        flash('✅ Reporte generado');
+      } catch (e) { flash('❌ ' + e.message); }
+      setReporteGenerating(false);
+    };
+
+    const exportarReporteCSV = () => {
+      if (!reporteData) return;
+      const rows = [['Fecha', 'Cliente', 'Productos', 'Total', 'Forma de pago']];
+      reporteData.notas.forEach(n => {
+        rows.push([fDateTime(n.fecha), n.clienteNombre, (n.items || []).map(it => it.nombre + ' x' + it.cant).join(' | '), (n.total || 0).toFixed(2), n.formaPago]);
+      });
+      downloadCSV('reporte_ventas_' + Date.now() + '.csv', rows);
+    };
+
+    const enviarReportePorCorreo = () => {
+      if (!reporteData) return;
+      const clientesTxt = reporteData.topClientes.map(([n, t]) => `• ${n}: ${fmtx(t)}`).join('\n') || 'Sin datos';
+      const productosTxt = reporteData.topProductos.map(([n, d]) => `• ${n}: ${d.cant} unidades — ${fmtx(d.total)}`).join('\n') || 'Sin datos';
+      const cuerpo = `REPORTE DE VENTAS\n${fDateTime(reporteData.desde)} — ${fDateTime(reporteData.hasta)}\n\nPedidos: ${reporteData.count}\nTotal vendido: ${fmtx(reporteData.total)}\nContado: ${fmtx(reporteData.totalContado)}\nCrédito: ${fmtx(reporteData.totalCredito)}\n\nTOP CLIENTES\n${clientesTxt}\n\nTOP PRODUCTOS\n${productosTxt}`;
+      const link = `mailto:${encodeURIComponent(reporteEmail || '')}?subject=${encodeURIComponent('Reporte de ventas — Productos de la Costa')}&body=${encodeURIComponent(cuerpo)}`;
+      window.location.href = link;
+    };
+
     const iniciarSeguimiento = r => {
       if (!navigator.geolocation) { flash('⚠️ Este dispositivo no soporta GPS'); return; }
       if (watchIdRef.current) navigator.geolocation.clearWatch(watchIdRef.current);
@@ -765,8 +869,16 @@
                 <button onClick={() => setOpen(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: 22, cursor: 'pointer' }}>✕</button>
               </div>
               {msg && <div style={{ background: '#14532d', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: '#4ade80', marginBottom: 12 }}>{msg}</div>}
+              {currentUser.role === 'admin' && diasDesdeUltimoRespaldo !== null && diasDesdeUltimoRespaldo >= 7 && (
+                <button onClick={() => { setTab('respaldo'); setRespaldoSubTab('respaldo'); }} style={{ width: '100%', textAlign: 'left', background: diasDesdeUltimoRespaldo >= 30 ? '#450a0a' : '#451a03', border: 'none', borderRadius: 8, padding: '8px 12px', fontSize: 12, color: diasDesdeUltimoRespaldo >= 30 ? '#fca5a5' : '#fcd34d', marginBottom: 12, cursor: 'pointer' }}>
+                  {diasDesdeUltimoRespaldo >= 30 ? '🔴' : '🟡'} Sin respaldo hace {diasDesdeUltimoRespaldo} días — toca uno
+                </button>
+              )}
+              {currentUser.role === 'admin' && diasDesdeUltimoRespaldo === null && (
+                <button onClick={() => { setTab('respaldo'); setRespaldoSubTab('respaldo'); }} style={{ width: '100%', textAlign: 'left', background: '#451a03', border: 'none', borderRadius: 8, padding: '8px 12px', fontSize: 12, color: '#fcd34d', marginBottom: 12, cursor: 'pointer' }}>🟡 Nunca se ha generado un respaldo — toca uno</button>
+              )}
               <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
-                {[['activas', 'Activas'], ['mapa', 'Mapa'], ['clientesqr', 'Clientes'], ['inventario', 'Inv.'], ['comprobantes', 'Comprob.'], ['historial', 'Historial']].filter(([v]) => v !== 'mapa' || currentUser.role === 'admin').map(([v, l]) => (
+                {[['activas', 'Activas'], ['mapa', 'Mapa'], ['clientesqr', 'Clientes'], ['inventario', 'Inv.'], ['comprobantes', 'Comprob.'], ['historial', 'Historial'], ['respaldo', 'Respaldo']].filter(([v]) => (v !== 'mapa' && v !== 'respaldo') || currentUser.role === 'admin').map(([v, l]) => (
                   <button key={v} onClick={() => setTab(v)} style={{ flex: 1, padding: '8px 1px', borderRadius: 8, border: 'none', background: tab === v ? '#38bdf8' : '#1e293b', color: tab === v ? '#0f172a' : '#94a3b8', fontSize: 9, fontWeight: 700, cursor: 'pointer' }}>{l}</button>
                 ))}
               </div>
@@ -1071,6 +1183,76 @@
                       </div>
                     );
                   })}
+                </>
+              )}
+
+              {tab === 'respaldo' && currentUser.role === 'admin' && (
+                <>
+                  <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+                    {[['respaldo', '💾 Respaldo'], ['reporte', '📈 Reporte de ventas']].map(([v, l]) => (
+                      <button key={v} onClick={() => setRespaldoSubTab(v)} style={{ flex: 1, padding: '8px 4px', borderRadius: 8, border: 'none', background: respaldoSubTab === v ? '#38bdf8' : '#1e293b', color: respaldoSubTab === v ? '#0f172a' : '#94a3b8', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>{l}</button>
+                    ))}
+                  </div>
+
+                  {respaldoSubTab === 'respaldo' && (
+                    <>
+                      <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 14 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Respaldo completo</div>
+                        <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 12 }}>Descarga un archivo con todos tus datos: productos, clientes, ventas, créditos, rutas, devoluciones e historial de inventario. Guárdalo en Drive, tu correo o donde prefieras.</div>
+                        <div style={{ fontSize: 12, color: diasDesdeUltimoRespaldo === null ? '#fcd34d' : diasDesdeUltimoRespaldo >= 30 ? '#fca5a5' : diasDesdeUltimoRespaldo >= 7 ? '#fcd34d' : '#4ade80', marginBottom: 12 }}>
+                          {diasDesdeUltimoRespaldo === null ? '⚠️ Nunca se ha generado un respaldo' : `Último respaldo: hace ${diasDesdeUltimoRespaldo} día(s)${backupMeta.por ? ' · ' + backupMeta.por : ''}`}
+                        </div>
+                        <button onClick={generarRespaldo} disabled={backupGenerating} style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 12, fontWeight: 700, cursor: 'pointer', opacity: backupGenerating ? 0.6 : 1 }}>{backupGenerating ? 'Generando…' : '💾 Generar y descargar respaldo'}</button>
+                      </div>
+                      <div style={{ fontSize: 11, color: '#64748b' }}>Recomendado: hazlo cada semana, y guarda uno aparte cada fin de mes. Te avisamos aquí arriba cuando ya lleve más de 7 días.</div>
+                    </>
+                  )}
+
+                  {respaldoSubTab === 'reporte' && (
+                    <>
+                      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+                        {[['hoy', 'Hoy'], ['semana', '7 días'], ['mes', '30 días'], ['custom', 'Rango']].map(([v, l]) => (
+                          <button key={v} onClick={() => setReporteRango(v)} style={{ flex: 1, padding: '7px 2px', borderRadius: 8, border: 'none', background: reporteRango === v ? '#38bdf8' : '#0f172a', color: reporteRango === v ? '#0f172a' : '#94a3b8', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>{l}</button>
+                        ))}
+                      </div>
+                      {reporteRango === 'custom' && (
+                        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                          <input type="date" value={reporteDesde} onChange={e => setReporteDesde(e.target.value)} style={{ ...inputStyle, marginBottom: 0, flex: 1 }} />
+                          <input type="date" value={reporteHasta} onChange={e => setReporteHasta(e.target.value)} style={{ ...inputStyle, marginBottom: 0, flex: 1 }} />
+                        </div>
+                      )}
+                      <button onClick={generarReporte} disabled={reporteGenerating} style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 10, fontWeight: 700, cursor: 'pointer', marginBottom: 14, opacity: reporteGenerating ? 0.6 : 1 }}>{reporteGenerating ? 'Generando…' : '📊 Generar reporte'}</button>
+
+                      {reporteData && (
+                        <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 14 }}>
+                          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>{fDateTime(reporteData.desde)} — {fDateTime(reporteData.hasta)}</div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+                            <div><div style={{ fontSize: 11, color: '#94a3b8' }}>Total vendido</div><div style={{ fontSize: 20, fontWeight: 800, color: '#38bdf8' }}>{fmtx(reporteData.total)}</div></div>
+                            <div><div style={{ fontSize: 11, color: '#94a3b8' }}>Pedidos</div><div style={{ fontSize: 20, fontWeight: 800 }}>{reporteData.count}</div></div>
+                            <div><div style={{ fontSize: 11, color: '#94a3b8' }}>Contado</div><div style={{ fontSize: 15, fontWeight: 700, color: '#4ade80' }}>{fmtx(reporteData.totalContado)}</div></div>
+                            <div><div style={{ fontSize: 11, color: '#94a3b8' }}>Crédito</div><div style={{ fontSize: 15, fontWeight: 700, color: '#fcd34d' }}>{fmtx(reporteData.totalCredito)}</div></div>
+                          </div>
+                          {reporteData.topClientes.length > 0 && <>
+                            <div style={{ fontSize: 11, color: '#64748b', fontWeight: 700, marginBottom: 6 }}>TOP CLIENTES</div>
+                            {reporteData.topClientes.map(([n, t], i) => <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}><span>{n}</span><span style={{ color: '#38bdf8', fontWeight: 700 }}>{fmtx(t)}</span></div>)}
+                          </>}
+                          {reporteData.topProductos.length > 0 && <>
+                            <div style={{ fontSize: 11, color: '#64748b', fontWeight: 700, margin: '10px 0 6px' }}>TOP PRODUCTOS</div>
+                            {reporteData.topProductos.map(([n, d], i) => <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}><span>{n} x{d.cant}</span><span style={{ color: '#38bdf8', fontWeight: 700 }}>{fmtx(d.total)}</span></div>)}
+                          </>}
+                        </div>
+                      )}
+                      {reporteData && (
+                        <>
+                          <button onClick={exportarReporteCSV} style={{ width: '100%', background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: 8, padding: 10, fontWeight: 700, cursor: 'pointer', fontSize: 12, marginBottom: 10 }}>📤 Exportar CSV</button>
+                          <div style={lblStyle}>Correo destino (opcional)</div>
+                          <input value={reporteEmail} onChange={e => setReporteEmail(e.target.value)} placeholder="correo@ejemplo.com" style={inputStyle} />
+                          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>Abre tu app de correo con el resumen ya escrito — revisa y dale enviar. Si quieres adjuntar el CSV, descárgalo arriba y agrégalo ahí.</div>
+                          <button onClick={enviarReportePorCorreo} style={{ width: '100%', background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: 12, fontWeight: 700, cursor: 'pointer' }}>📧 Preparar correo</button>
+                        </>
+                      )}
+                    </>
+                  )}
                 </>
               )}
 
